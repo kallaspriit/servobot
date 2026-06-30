@@ -3,11 +3,9 @@
 #include <cstdlib>
 #include <cstring>
 
-#include <SCServo.h>
-
-#include "half_duplex_stream.hpp"
+#include "St3215.hpp"
+#include "SwUartPioBus.hpp"
 #include "stream_operators.hpp"
-#include "sw_uart_half_duplex.hpp"
 
 // Single GPIO shared with the servo bus, through a ~1k series resistor.
 static constexpr uint kServoPin = 23;
@@ -21,81 +19,96 @@ static constexpr uint8_t kMaxScanId = 20;
 // Most servos a single "sync" command can address.
 static constexpr size_t kMaxSyncServos = 8;
 
-// EEPROM registers not given a name by the SCServo library.
-static constexpr uint8_t kRegFirmwareMajor = 0;
-static constexpr uint8_t kRegFirmwareMinor = 1;
-static constexpr uint8_t kRegMaxVoltageLimit = 14;
-static constexpr uint8_t kRegMinVoltageLimit = 15;
-
-static SwUartHalfDuplex bus;
-static HalfDuplexStream servoStream(bus);
-static SMS_STS servo;
+static SwUartPioBus bus(kServoPin, kServoBaud);
+static St3215 servo(bus);
 
 // Line buffer for the serial console.
 static char lineBuffer[64];
 static size_t lineLength = 0;
 
-/** Reads and prints the servo's identification registers. */
-static void printServoInfo(uint8_t id) {
-    const int firmwareMajor = servo.readByte(id, kRegFirmwareMajor);
-    const int firmwareMinor = servo.readByte(id, kRegFirmwareMinor);
-    const int versionMajor = servo.readByte(id, SMS_STS_MODEL_L);
-    const int versionMinor = servo.readByte(id, SMS_STS_MODEL_H);
-    const int baudIndex = servo.readByte(id, SMS_STS_BAUD_RATE);
-
-    Serial << "Firmware version: " << firmwareMajor << "." << firmwareMinor << endl;
-    Serial << "Servo series version: " << versionMajor << "." << versionMinor << endl;
-    Serial << "Baud index: " << baudIndex << endl;
+/** Prints a deci-volt value (tenths of a volt) as "X.Y V". */
+static void printVolts(int deciVolts) {
+    Serial << (deciVolts / 10) << "." << (deciVolts % 10) << " V";
 }
 
-/** Reads and prints the servo's voltage, temperature, limits, and error flags. */
-static void printServoStatus(uint8_t id) {
-    const int voltage = servo.ReadVoltage(id);
-    const int temperature = servo.ReadTemper(id);
-    const int maxVoltage = servo.readByte(id, kRegMaxVoltageLimit);
-    const int minVoltage = servo.readByte(id, kRegMinVoltageLimit);
-    const uint8_t error = servo.Error;
-
-    if (voltage >= 0) {
-        Serial << "Voltage: " << (voltage / 10) << "." << (voltage % 10) << " V" << endl;
-    }
-
-    if (minVoltage >= 0 && maxVoltage >= 0) {
-        Serial << "Voltage limits: " << (minVoltage / 10) << "." << (minVoltage % 10) << " - "
-               << (maxVoltage / 10) << "." << (maxVoltage % 10) << " V" << endl;
-    }
-
-    if (temperature >= 0) {
-        Serial << "Temperature: " << temperature << " C" << endl;
-    }
-
+/** Prints the servo's decoded status/fault flags. */
+static void printStatusFlags(const St3215::ServoStatus &status) {
     Serial << "Status flags: ";
 
-    if (error == 0) {
+    if (status.raw == 0) {
         Serial << "none";
     } else {
-        if (error & 0x01) {
+        if (status.hasVoltageFault) {
             Serial << "voltage ";
         }
 
-        if (error & 0x02) {
+        if (status.hasSensorFault) {
             Serial << "sensor ";
         }
 
-        if (error & 0x04) {
+        if (status.hasTemperatureFault) {
             Serial << "temperature ";
         }
 
-        if (error & 0x08) {
+        if (status.hasCurrentFault) {
             Serial << "current ";
         }
 
-        if (error & 0x20) {
+        if (status.hasOverloadFault) {
             Serial << "overload ";
         }
     }
 
     Serial << endl;
+}
+
+/** Reads and prints a servo's identification, limits, and live feedback. */
+static void printServoInfo(uint8_t id) {
+    St3215::ServoInfo info;
+
+    if (!servo.readInfo(id, info)) {
+        Serial << "servo " << id << " no response" << endl;
+
+        return;
+    }
+
+    Serial << "Firmware version: " << info.firmwareMajor << "." << info.firmwareMinor << endl;
+    Serial << "Servo series version: " << info.modelMajor << "." << info.modelMinor << endl;
+    Serial << "Stored ID: " << info.id << ", baud index: " << info.baudIndex << endl;
+    Serial << "Voltage limits: ";
+    printVolts(info.minVoltageDeciV);
+    Serial << " - ";
+    printVolts(info.maxVoltageDeciV);
+    Serial << endl;
+    Serial << "Max temperature: " << info.maxTemperatureC << " C" << endl;
+
+    St3215::ServoFeedback feedback;
+
+    if (servo.readFeedback(id, feedback)) {
+        Serial << "Voltage: ";
+        printVolts(feedback.voltageDeciV);
+        Serial << endl;
+        Serial << "Temperature: " << feedback.temperatureC << " C" << endl;
+        Serial << "Position: " << feedback.position << endl;
+        printStatusFlags(feedback.status);
+    }
+}
+
+/** Reads and prints a servo's live feedback. */
+static void printFeedback(uint8_t id) {
+    St3215::ServoFeedback feedback;
+
+    if (!servo.readFeedback(id, feedback)) {
+        Serial << "servo " << id << " no response" << endl;
+
+        return;
+    }
+
+    Serial << "pos=" << feedback.position << " speed=" << feedback.speed << " load=" << feedback.load << " current=" << feedback.current << " moving=" << feedback.isMoving << endl;
+    Serial << "Voltage: ";
+    printVolts(feedback.voltageDeciV);
+    Serial << " temp=" << feedback.temperatureC << " C" << endl;
+    printStatusFlags(feedback.status);
 }
 
 /** Pings every ID up to kMaxScanId and lists the ones that respond. */
@@ -105,7 +118,7 @@ static void scanBus() {
     int found = 0;
 
     for (uint8_t id = 1; id <= kMaxScanId; id++) {
-        if (servo.Ping(id) != -1) {
+        if (servo.ping(id) != -1) {
             Serial << "  found servo " << id << endl;
             found++;
         }
@@ -114,27 +127,19 @@ static void scanBus() {
     Serial << found << " servo(s) found" << endl;
 }
 
-/** Changes a servo's ID with EEPROM unlock/lock and commit delays. */
-static bool changeId(uint8_t fromId, uint8_t toId) {
-    servo.unLockEprom(fromId);
-    delay(10);
-    servo.writeByte(fromId, SMS_STS_ID, toId);
-    delay(10);
-    servo.LockEprom(toId);
-    delay(20);
-
-    return servo.Ping(toId) != -1;
-}
-
 /** Prints the available console commands. */
 static void printHelp() {
     Serial << "Commands:" << endl;
     Serial << "  scan                       - find servos (IDs 1.." << kMaxScanId << ")" << endl;
     Serial << "  ping <id>                  - ping a servo" << endl;
-    Serial << "  info <id>                  - version, voltage, temp, flags" << endl;
+    Serial << "  info <id>                  - version, limits, live feedback" << endl;
+    Serial << "  feedback <id>              - live position/speed/load/etc" << endl;
     Serial << "  id <from> <to>             - change ID (ONLY ONE servo on bus!)" << endl;
     Serial << "  move <id> <pos> [spd] [acc] - move to position 0..4095" << endl;
     Serial << "  sync <pos> <id> [id...]    - move several servos together" << endl;
+    Serial << "  speed <id> <val> [acc]     - continuous speed (needs mode 1)" << endl;
+    Serial << "  mode <id> <0|1|2|3>        - position/speed/pwm/step" << endl;
+    Serial << "  calibrate <id>             - set current position as mid (2047)" << endl;
     Serial << "  torque <id> <0|1>          - torque off / on" << endl;
     Serial << "  help                       - this list" << endl;
 }
@@ -169,7 +174,7 @@ static void handleCommand(char *line) {
     if (strcmp(command, "ping") == 0) {
         const int id = nextInt(-1);
 
-        if (servo.Ping(id) != -1) {
+        if (servo.ping(id) != -1) {
             Serial << "servo " << id << " OK" << endl;
         } else {
             Serial << "servo " << id << " no response" << endl;
@@ -179,16 +184,13 @@ static void handleCommand(char *line) {
     }
 
     if (strcmp(command, "info") == 0) {
-        const int id = nextInt(-1);
+        printServoInfo((uint8_t)nextInt(-1));
 
-        if (servo.Ping(id) == -1) {
-            Serial << "servo " << id << " no response" << endl;
+        return;
+    }
 
-            return;
-        }
-
-        printServoInfo(id);
-        printServoStatus(id);
+    if (strcmp(command, "feedback") == 0) {
+        printFeedback((uint8_t)nextInt(-1));
 
         return;
     }
@@ -203,7 +205,7 @@ static void handleCommand(char *line) {
             return;
         }
 
-        if (changeId((uint8_t)from, (uint8_t)to)) {
+        if (servo.setId((uint8_t)from, (uint8_t)to)) {
             Serial << "ID changed " << from << " -> " << to << endl;
         } else {
             Serial << "ID change failed (is exactly one servo connected?)" << endl;
@@ -224,7 +226,7 @@ static void handleCommand(char *line) {
             return;
         }
 
-        servo.WritePosEx((uint8_t)id, (s16)pos, (u16)speed, (u8)acc);
+        servo.writePos((uint8_t)id, (int16_t)pos, (uint16_t)speed, (uint8_t)acc);
         Serial << "move " << id << " -> " << pos << endl;
 
         return;
@@ -239,15 +241,15 @@ static void handleCommand(char *line) {
             return;
         }
 
-        u8 ids[kMaxSyncServos];
-        s16 positions[kMaxSyncServos];
-        u16 speeds[kMaxSyncServos];
-        u8 accs[kMaxSyncServos];
-        u8 count = 0;
+        uint8_t ids[kMaxSyncServos];
+        int16_t positions[kMaxSyncServos];
+        uint16_t speeds[kMaxSyncServos];
+        uint8_t accs[kMaxSyncServos];
+        uint8_t count = 0;
 
         for (int id = nextInt(-1); id > 0 && count < kMaxSyncServos; id = nextInt(-1)) {
-            ids[count] = (u8)id;
-            positions[count] = (s16)pos;
+            ids[count] = (uint8_t)id;
+            positions[count] = (int16_t)pos;
             speeds[count] = 0;
             accs[count] = 0;
             count++;
@@ -259,8 +261,56 @@ static void handleCommand(char *line) {
             return;
         }
 
-        servo.SyncWritePosEx(ids, count, positions, speeds, accs);
+        servo.syncWritePos(ids, count, positions, speeds, accs);
         Serial << "sync " << count << " servo(s) -> " << pos << endl;
+
+        return;
+    }
+
+    if (strcmp(command, "speed") == 0) {
+        const int id = nextInt(-1);
+        const int value = nextInt(0);
+        const int acc = nextInt(0);
+
+        if (id < 1) {
+            Serial << "usage: speed <id> <value> [acc]  (set mode 1 first)" << endl;
+
+            return;
+        }
+
+        servo.writeSpeed((uint8_t)id, (int16_t)value, (uint8_t)acc);
+        Serial << "speed " << id << " = " << value << endl;
+
+        return;
+    }
+
+    if (strcmp(command, "mode") == 0) {
+        const int id = nextInt(-1);
+        const int mode = nextInt(-1);
+
+        if (id < 1 || mode < 0 || mode > 3) {
+            Serial << "usage: mode <id> <0=pos 1=speed 2=pwm 3=step>" << endl;
+
+            return;
+        }
+
+        if (servo.setMode((uint8_t)id, (St3215::Mode)mode)) {
+            Serial << "mode " << id << " = " << mode << endl;
+        } else {
+            Serial << "mode change failed" << endl;
+        }
+
+        return;
+    }
+
+    if (strcmp(command, "calibrate") == 0) {
+        const int id = nextInt(-1);
+
+        if (servo.calibrateMid((uint8_t)id)) {
+            Serial << "calibrated servo " << id << " mid-point" << endl;
+        } else {
+            Serial << "calibrate failed" << endl;
+        }
 
         return;
     }
@@ -269,7 +319,7 @@ static void handleCommand(char *line) {
         const int id = nextInt(-1);
         const int on = nextInt(-1);
 
-        servo.EnableTorque((uint8_t)id, on != 0 ? 1 : 0);
+        servo.setTorque((uint8_t)id, on != 0);
         Serial << "torque " << id << " = " << (on != 0) << endl;
 
         return;
@@ -288,15 +338,13 @@ void setup() {
 
     delay(100);
 
-    Serial << "ST3215 console (SCServo over single-wire PIO)" << endl;
+    Serial << "ST3215 console (custom driver over single-wire PIO)" << endl;
 
-    if (!bus.begin(kServoPin, kServoBaud)) {
+    if (!servo.begin()) {
         Serial << "Failed to start PIO UART (no free state machine)" << endl;
 
         return;
     }
-
-    servo.pSerial = &servoStream;
 
     scanBus();
     printHelp();

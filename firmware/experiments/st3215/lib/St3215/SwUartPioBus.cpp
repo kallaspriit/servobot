@@ -1,25 +1,21 @@
-#include "sw_uart_half_duplex.hpp"
+#include "SwUartPioBus.hpp"
 
-#include "hardware/pio.h"
 #include "pico/time.h"
 
-// Both UART programs run at 8 cycles per bit (8x oversampling), the same
-// scheme the pico-examples UART uses. The state-machine clock is therefore
-// baud * 8.
+// Both UART programs run at 8 cycles per bit (8x oversampling), the same scheme
+// the pico-examples UART uses. The state-machine clock is therefore baud * 8.
 static constexpr uint kCyclesPerBit = 8;
 
-// 8N1 frame layout shifted out LSB first: bit 0 = start (low),
-// bits 1..8 = data, bit 9 = stop (high). Ten bits total.
+// 8N1 frame shifted out LSB first: bit 0 = start (low), bits 1..8 = data,
+// bit 9 = stop (high). Ten bits total.
 static constexpr uint kBitsPerFrame = 10;
 
-bool SwUartHalfDuplex::begin(uint pin, uint baud, PIO pio) {
-    pio_ = pio;
-    pin_ = pin;
-    frameUs_ = (float)kBitsPerFrame * 1e6f / (float)baud;
+bool SwUartPioBus::begin() {
+    frameUs_ = (float)kBitsPerFrame * 1e6f / (float)baud_;
 
-    // TX program (jmp target is 0-based; the loader relocates it by the load
-    // offset). Idles by stalling on `pull` while holding the last (stop/high)
-    // pin level.
+    // TX program (jmp targets are 0-based; the loader relocates them by the
+    // load offset). Idles by stalling on `pull` while holding the last (stop /
+    // high) pin level.
     //
     //   pull block
     //   set x, 9            ; 10 bits to shift out (start + 8 data + stop)
@@ -34,16 +30,16 @@ bool SwUartHalfDuplex::begin(uint pin, uint baud, PIO pio) {
     };
     struct pio_program txPgm = {txProgram, count_of(txProgram), -1};
 
-    // RX program. Waits for the falling edge of a start bit, delays 1.5 bit
-    // times to the centre of the first data bit, then samples 8 bits. Autopush
+    // RX program. Waits for the start bit's falling edge, delays ~1.5 bit times
+    // to the centre of the first data bit, then samples 8 bits. Autopush
     // delivers the byte once 8 bits are in.
     //
     // start:
     //   wait 0 pin 0
-    //   set x, 7 [10]       ; 11 cycles ~ 1.5 bit times to first sample
+    //   set x, 7 [10]       ; ~1.5 bit times to first sample
     // bitloop:
-    //   in pins, 1          ; 1 cycle
-    //   jmp x-- bitloop [6] ; + 7 cycles = 8 cycles per bit
+    //   in pins, 1
+    //   jmp x-- bitloop [6] ; 8 cycles per bit
     const uint16_t rxProgram[] = {
         pio_encode_wait_pin(false, 0),
         pio_encode_set(pio_x, 7) | pio_encode_delay(10),
@@ -64,7 +60,7 @@ bool SwUartHalfDuplex::begin(uint pin, uint baud, PIO pio) {
     offsetTx_ = pio_add_program(pio_, &txPgm);
     offsetRx_ = pio_add_program(pio_, &rxPgm);
 
-    const float clockDiv = (float)clock_get_hz(clk_sys) / (float)(kCyclesPerBit * baud);
+    const float clockDiv = (float)clock_get_hz(clk_sys) / (float)(kCyclesPerBit * baud_);
 
     // Hand the pin to the PIO before configuring the state machines.
     pio_gpio_init(pio_, pin_);
@@ -97,14 +93,14 @@ bool SwUartHalfDuplex::begin(uint pin, uint baud, PIO pio) {
     return true;
 }
 
-void SwUartHalfDuplex::writeBytes(const uint8_t *data, size_t len) {
+void SwUartPioBus::writePacket(const uint8_t* data, size_t length) {
     // Stop listening so we never capture our own transmission as echo.
     pio_sm_set_enabled(pio_, smRx_, false);
 
     // Drive the bus.
     pio_sm_set_consecutive_pindirs(pio_, smTx_, pin_, 1, true);
 
-    for (size_t i = 0; i < len; i++) {
+    for (size_t i = 0; i < length; i++) {
         const uint32_t frame = ((uint32_t)data[i] << 1) | (1u << 9);
         pio_sm_put_blocking(pio_, smTx_, frame);
     }
@@ -117,10 +113,8 @@ void SwUartHalfDuplex::writeBytes(const uint8_t *data, size_t len) {
     // Then wait until the final frame, including its stop bit, has actually been
     // shifted onto the wire. The TX-stall flag asserts when the state machine
     // stalls on the next (empty) pull, which only happens once the last bit is
-    // out. Clearing it here is safe because the last frame is still shifting at
-    // this point, so the SM is not yet stalled. This lets us release the bus the
-    // moment our transmission ends, instead of after a guessed delay, so a fast
-    // servo reply always lands on a freed line.
+    // out. Clearing it here is safe because the last frame is still shifting, so
+    // the SM is not yet stalled.
     const uint32_t txStallMask = 1u << (PIO_FDEBUG_TXSTALL_LSB + smTx_);
     pio_->fdebug = txStallMask;
 
@@ -135,16 +129,16 @@ void SwUartHalfDuplex::writeBytes(const uint8_t *data, size_t len) {
     pio_sm_set_consecutive_pindirs(pio_, smTx_, pin_, 1, false);
 }
 
-size_t SwUartHalfDuplex::readBytes(uint8_t *buf, size_t len, uint32_t timeoutUs) {
+size_t SwUartPioBus::readBytes(uint8_t* buffer, size_t length, uint32_t timeoutUs) {
     size_t count = 0;
     absolute_time_t deadline = make_timeout_time_us(timeoutUs);
 
-    while (count < len) {
+    while (count < length) {
         if (!pio_sm_is_rx_fifo_empty(pio_, smRx_)) {
             const uint32_t value = pio_sm_get(pio_, smRx_);
 
             // Sampled bits land in the top byte of the 32-bit FIFO word.
-            buf[count++] = (uint8_t)(value >> 24);
+            buffer[count++] = (uint8_t)(value >> 24);
             deadline = make_timeout_time_us(timeoutUs);
 
             continue;
@@ -158,25 +152,11 @@ size_t SwUartHalfDuplex::readBytes(uint8_t *buf, size_t len, uint32_t timeoutUs)
     return count;
 }
 
-void SwUartHalfDuplex::flushRx() {
+void SwUartPioBus::flushRx() {
     pio_sm_clear_fifos(pio_, smRx_);
 }
 
-int SwUartHalfDuplex::rxAvailable() {
-    return (int)pio_sm_get_rx_fifo_level(pio_, smRx_);
-}
-
-int SwUartHalfDuplex::readByteNonBlocking() {
-    if (pio_sm_is_rx_fifo_empty(pio_, smRx_)) {
-        return -1;
-    }
-
-    const uint32_t value = pio_sm_get(pio_, smRx_);
-
-    return (int)(uint8_t)(value >> 24);
-}
-
-void SwUartHalfDuplex::restartRx() {
+void SwUartPioBus::restartRx() {
     pio_sm_set_enabled(pio_, smRx_, false);
     pio_sm_clear_fifos(pio_, smRx_);
     pio_sm_restart(pio_, smRx_);
