@@ -135,7 +135,7 @@ static void printHelp() {
     Serial << "  info <id>                  - version, limits, live feedback" << endl;
     Serial << "  feedback <id>              - live position/speed/load/etc" << endl;
     Serial << "  id <from> <to>             - change ID (ONLY ONE servo on bus!)" << endl;
-    Serial << "  move <id> <pos> [spd] [acc] - move to position 0..4095" << endl;
+    Serial << "  move <id> <pos> [spd] [acc] - position 0..4095 (multi-turn in step mode)" << endl;
     Serial << "  sync <pos> <id> [id...]    - move several servos together" << endl;
     Serial << "  speed <id> <val> [acc]     - continuous speed (needs mode 1)" << endl;
     Serial << "  mode <id> <0|1|2|3>        - position/speed/pwm/step" << endl;
@@ -216,12 +216,14 @@ static void handleCommand(char *line) {
 
     if (strcmp(command, "move") == 0) {
         const int id = nextInt(-1);
-        const int pos = nextInt(-1);
+        const int pos = nextInt(-100000);
         const int speed = nextInt(0);
         const int acc = nextInt(0);
 
-        if (id < 1 || pos < 0 || pos > 4095) {
-            Serial << "usage: move <id> <pos 0..4095> [speed] [acc]" << endl;
+        // Position mode clamps to its angle limits (0..4095); step mode (mode 3)
+        // uses the full signed multi-turn range.
+        if (id < 1 || pos < -32767 || pos > 32767) {
+            Serial << "usage: move <id> <pos -32767..32767> [speed] [acc]" << endl;
 
             return;
         }

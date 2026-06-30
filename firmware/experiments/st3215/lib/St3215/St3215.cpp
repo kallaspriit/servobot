@@ -209,7 +209,9 @@ bool St3215::readFeedback(uint8_t id, ServoFeedback& out) {
         return false;
     }
 
-    out.position = (int)((body[0] | (body[1] << 8)) & 0x7FFF);
+    // Position is unsigned 0..4095 in position mode, but sign-magnitude and
+    // multi-turn in step mode, so decode the sign.
+    out.position = decodeSigned(body[0] | (body[1] << 8));
     out.speed = decodeSigned(body[2] | (body[3] << 8));
     out.load = decodeSigned(body[4] | (body[5] << 8));
     out.voltageDeciV = body[6];
