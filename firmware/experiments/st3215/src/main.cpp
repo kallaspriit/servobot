@@ -1,8 +1,6 @@
 #include <Arduino.h>
 
-#include <cstdlib>
-#include <cstring>
-
+#include "SerialConsole.hpp"
 #include "St3215.hpp"
 #include "SwUartPioBus.hpp"
 #include "stream_operators.hpp"
@@ -16,15 +14,12 @@ static constexpr uint kServoBaud = 1000000;
 // Highest ID probed by the "scan" command.
 static constexpr uint8_t kMaxScanId = 20;
 
-// Most servos a single "sync" command can address.
+// Most servos a single "sync"/"syncread" command can address.
 static constexpr size_t kMaxSyncServos = 8;
 
 static SwUartPioBus bus(kServoPin, kServoBaud);
 static St3215 servo(bus);
-
-// Line buffer for the serial console.
-static char lineBuffer[64];
-static size_t lineLength = 0;
+static SerialConsole console(Serial);
 
 /** Prints a deci-volt value (tenths of a volt) as "X.Y V". */
 static void printVolts(int deciVolts) {
@@ -127,83 +122,34 @@ static void scanBus() {
     Serial << found << " servo(s) found" << endl;
 }
 
-/** Prints the available console commands. */
-static void printHelp() {
-    Serial << "Commands:" << endl;
-    Serial << "  scan                       - find servos (IDs 1.." << kMaxScanId << ")" << endl;
-    Serial << "  ping <id>                  - ping a servo" << endl;
-    Serial << "  info <id>                  - version, limits, live feedback" << endl;
-    Serial << "  feedback <id>              - live position/speed/load/etc" << endl;
-    Serial << "  id <from> <to>             - change ID (ONLY ONE servo on bus!)" << endl;
-    Serial << "  move <id> <pos> [spd] [acc] - position 0..4095 (multi-turn in step mode)" << endl;
-    Serial << "  sync <pos> <id> [id...]    - move several servos together" << endl;
-    Serial << "  syncread <id> [id...]      - read feedback from several at once" << endl;
-    Serial << "  speed <id> <val> [acc]     - continuous speed (needs mode 1)" << endl;
-    Serial << "  mode <id> <0|1|2|3>        - position/speed/pwm/step" << endl;
-    Serial << "  calibrate <id>             - set current position as mid (2047)" << endl;
-    Serial << "  anglelimit <id> <min> <max> - position limits (0..4095, 0/0 = none)" << endl;
-    Serial << "  torquelimit <id> <0..1000> - output torque limit" << endl;
-    Serial << "  pid <id> <kp> <kd> <ki>    - position loop gains (0..255)" << endl;
-    Serial << "  unload <id> <mask>         - faults that release torque (bitmask)" << endl;
-    Serial << "  torque <id> <0|1>          - torque off / on" << endl;
-    Serial << "  help                       - this list" << endl;
-}
-
-/** Returns the next whitespace-separated token as an int, or def if absent. */
-static int nextInt(int def) {
-    const char *token = strtok(nullptr, " ");
-
-    // Base 0 auto-detects 0x-prefixed hex (handy for fault masks) and decimal.
-    return token ? (int)strtol(token, nullptr, 0) : def;
-}
-
-/** Parses and executes one console command line (modified in place by strtok). */
-static void handleCommand(char *line) {
-    const char *command = strtok(line, " ");
-
-    if (command == nullptr) {
-        return;
-    }
-
-    if (strcmp(command, "help") == 0) {
-        printHelp();
-
-        return;
-    }
-
-    if (strcmp(command, "scan") == 0) {
+/** Registers all servo console commands. */
+static void registerCommands() {
+    console.addCommand("scan", "scan                       - find servos (IDs 1..20)", [](SerialConsole &c) {
+        (void)c;
         scanBus();
+    });
 
-        return;
-    }
-
-    if (strcmp(command, "ping") == 0) {
-        const int id = nextInt(-1);
+    console.addCommand("ping", "ping <id>                  - ping a servo", [](SerialConsole &c) {
+        const int id = c.nextInt(-1);
 
         if (servo.ping(id) != -1) {
             Serial << "servo " << id << " OK" << endl;
         } else {
             Serial << "servo " << id << " no response" << endl;
         }
+    });
 
-        return;
-    }
+    console.addCommand("info", "info <id>                  - version, limits, live feedback", [](SerialConsole &c) {
+        printServoInfo((uint8_t)c.nextInt(-1));
+    });
 
-    if (strcmp(command, "info") == 0) {
-        printServoInfo((uint8_t)nextInt(-1));
+    console.addCommand("feedback", "feedback <id>              - live position/speed/load/etc", [](SerialConsole &c) {
+        printFeedback((uint8_t)c.nextInt(-1));
+    });
 
-        return;
-    }
-
-    if (strcmp(command, "feedback") == 0) {
-        printFeedback((uint8_t)nextInt(-1));
-
-        return;
-    }
-
-    if (strcmp(command, "id") == 0) {
-        const int from = nextInt(-1);
-        const int to = nextInt(-1);
+    console.addCommand("id", "id <from> <to>             - change ID (ONLY ONE servo on bus!)", [](SerialConsole &c) {
+        const int from = c.nextInt(-1);
+        const int to = c.nextInt(-1);
 
         if (from < 1 || from > 253 || to < 1 || to > 253) {
             Serial << "usage: id <from 1..253> <to 1..253>" << endl;
@@ -216,18 +162,14 @@ static void handleCommand(char *line) {
         } else {
             Serial << "ID change failed (is exactly one servo connected?)" << endl;
         }
+    });
 
-        return;
-    }
+    console.addCommand("move", "move <id> <pos> [spd] [acc] - position 0..4095 (multi-turn in step mode)", [](SerialConsole &c) {
+        const int id = c.nextInt(-1);
+        const int pos = c.nextInt(-100000);
+        const int speed = c.nextInt(0);
+        const int acc = c.nextInt(0);
 
-    if (strcmp(command, "move") == 0) {
-        const int id = nextInt(-1);
-        const int pos = nextInt(-100000);
-        const int speed = nextInt(0);
-        const int acc = nextInt(0);
-
-        // Position mode clamps to its angle limits (0..4095); step mode (mode 3)
-        // uses the full signed multi-turn range.
         if (id < 1 || pos < -32767 || pos > 32767) {
             Serial << "usage: move <id> <pos -32767..32767> [speed] [acc]" << endl;
 
@@ -236,12 +178,10 @@ static void handleCommand(char *line) {
 
         servo.writePos((uint8_t)id, (int16_t)pos, (uint16_t)speed, (uint8_t)acc);
         Serial << "move " << id << " -> " << pos << endl;
+    });
 
-        return;
-    }
-
-    if (strcmp(command, "sync") == 0) {
-        const int pos = nextInt(-1);
+    console.addCommand("sync", "sync <pos> <id> [id...]    - move several servos together", [](SerialConsole &c) {
+        const int pos = c.nextInt(-1);
 
         if (pos < 0 || pos > 4095) {
             Serial << "usage: sync <pos 0..4095> <id> [id...]" << endl;
@@ -255,7 +195,7 @@ static void handleCommand(char *line) {
         uint8_t accs[kMaxSyncServos];
         uint8_t count = 0;
 
-        for (int id = nextInt(-1); id > 0 && count < kMaxSyncServos; id = nextInt(-1)) {
+        for (int id = c.nextInt(-1); id > 0 && count < kMaxSyncServos; id = c.nextInt(-1)) {
             ids[count] = (uint8_t)id;
             positions[count] = (int16_t)pos;
             speeds[count] = 0;
@@ -271,15 +211,13 @@ static void handleCommand(char *line) {
 
         servo.syncWritePos(ids, count, positions, speeds, accs);
         Serial << "sync " << count << " servo(s) -> " << pos << endl;
+    });
 
-        return;
-    }
-
-    if (strcmp(command, "syncread") == 0) {
+    console.addCommand("syncread", "syncread <id> [id...]      - read feedback from several at once", [](SerialConsole &c) {
         uint8_t ids[kMaxSyncServos];
         uint8_t count = 0;
 
-        for (int id = nextInt(-1); id > 0 && count < kMaxSyncServos; id = nextInt(-1)) {
+        for (int id = c.nextInt(-1); id > 0 && count < kMaxSyncServos; id = c.nextInt(-1)) {
             ids[count++] = (uint8_t)id;
         }
 
@@ -305,93 +243,12 @@ static void handleCommand(char *line) {
             printVolts(feedback[i].voltageDeciV);
             Serial << endl;
         }
+    });
 
-        return;
-    }
-
-    if (strcmp(command, "anglelimit") == 0) {
-        const int id = nextInt(-1);
-        const int low = nextInt(-1);
-        const int high = nextInt(-1);
-
-        if (id < 1 || low < 0 || low > 4095 || high < 0 || high > 4095) {
-            Serial << "usage: anglelimit <id> <min 0..4095> <max 0..4095>" << endl;
-
-            return;
-        }
-
-        if (servo.setAngleLimits((uint8_t)id, (uint16_t)low, (uint16_t)high)) {
-            Serial << "angle limits " << id << " = " << low << ".." << high << endl;
-        } else {
-            Serial << "set angle limits failed" << endl;
-        }
-
-        return;
-    }
-
-    if (strcmp(command, "torquelimit") == 0) {
-        const int id = nextInt(-1);
-        const int limit = nextInt(-1);
-
-        if (id < 1 || limit < 0 || limit > 1000) {
-            Serial << "usage: torquelimit <id> <0..1000>" << endl;
-
-            return;
-        }
-
-        if (servo.setTorqueLimit((uint8_t)id, (uint16_t)limit)) {
-            Serial << "torque limit " << id << " = " << limit << endl;
-        } else {
-            Serial << "set torque limit failed" << endl;
-        }
-
-        return;
-    }
-
-    if (strcmp(command, "pid") == 0) {
-        const int id = nextInt(-1);
-        const int kp = nextInt(-1);
-        const int kd = nextInt(-1);
-        const int ki = nextInt(-1);
-
-        if (id < 1 || kp < 0 || kp > 255 || kd < 0 || kd > 255 || ki < 0 || ki > 255) {
-            Serial << "usage: pid <id> <kp> <kd> <ki>  (each 0..255)" << endl;
-
-            return;
-        }
-
-        if (servo.setPid((uint8_t)id, (uint8_t)kp, (uint8_t)kd, (uint8_t)ki)) {
-            Serial << "pid " << id << " = " << kp << "/" << kd << "/" << ki << endl;
-        } else {
-            Serial << "set pid failed" << endl;
-        }
-
-        return;
-    }
-
-    if (strcmp(command, "unload") == 0) {
-        const int id = nextInt(-1);
-        const int mask = nextInt(-1);
-
-        if (id < 1 || mask < 0 || mask > 255) {
-            Serial << "usage: unload <id> <mask>  (0x01 volt 0x02 sensor 0x04 temp 0x08 current 0x20 overload)" << endl;
-
-            return;
-        }
-
-        if (servo.setUnloadingCondition((uint8_t)id, (uint8_t)mask)) {
-            Serial << "unload condition " << id << " = " << mask << endl;
-        } else {
-            Serial << "set unload condition failed" << endl;
-        }
-
-        return;
-    }
-
-    if (strcmp(command, "speed") == 0) {
-        const int id = nextInt(-1);
-        const int value = nextInt(0);
-        const int acc = nextInt(0);
+    console.addCommand("speed", "speed <id> <val> [acc]     - continuous speed (needs mode 1)", [](SerialConsole &c) {
+        const int id = c.nextInt(-1);
+        const int value = c.nextInt(0);
+        const int acc = c.nextInt(0);
 
         if (id < 1) {
             Serial << "usage: speed <id> <value> [acc]  (set mode 1 first)" << endl;
@@ -401,13 +258,11 @@ static void handleCommand(char *line) {
 
         servo.writeSpeed((uint8_t)id, (int16_t)value, (uint8_t)acc);
         Serial << "speed " << id << " = " << value << endl;
+    });
 
-        return;
-    }
-
-    if (strcmp(command, "mode") == 0) {
-        const int id = nextInt(-1);
-        const int mode = nextInt(-1);
+    console.addCommand("mode", "mode <id> <0|1|2|3>        - position/speed/pwm/step", [](SerialConsole &c) {
+        const int id = c.nextInt(-1);
+        const int mode = c.nextInt(-1);
 
         if (id < 1 || mode < 0 || mode > 3) {
             Serial << "usage: mode <id> <0=pos 1=speed 2=pwm 3=step>" << endl;
@@ -420,33 +275,96 @@ static void handleCommand(char *line) {
         } else {
             Serial << "mode change failed" << endl;
         }
+    });
 
-        return;
-    }
-
-    if (strcmp(command, "calibrate") == 0) {
-        const int id = nextInt(-1);
+    console.addCommand("calibrate", "calibrate <id>             - set current position as mid (2047)", [](SerialConsole &c) {
+        const int id = c.nextInt(-1);
 
         if (servo.calibrateMid((uint8_t)id)) {
             Serial << "calibrated servo " << id << " mid-point" << endl;
         } else {
             Serial << "calibrate failed" << endl;
         }
+    });
 
-        return;
-    }
+    console.addCommand("anglelimit", "anglelimit <id> <min> <max> - position limits (0..4095, 0/0 = none)", [](SerialConsole &c) {
+        const int id = c.nextInt(-1);
+        const int low = c.nextInt(-1);
+        const int high = c.nextInt(-1);
 
-    if (strcmp(command, "torque") == 0) {
-        const int id = nextInt(-1);
-        const int on = nextInt(-1);
+        if (id < 1 || low < 0 || low > 4095 || high < 0 || high > 4095) {
+            Serial << "usage: anglelimit <id> <min 0..4095> <max 0..4095>" << endl;
+
+            return;
+        }
+
+        if (servo.setAngleLimits((uint8_t)id, (uint16_t)low, (uint16_t)high)) {
+            Serial << "angle limits " << id << " = " << low << ".." << high << endl;
+        } else {
+            Serial << "set angle limits failed" << endl;
+        }
+    });
+
+    console.addCommand("torquelimit", "torquelimit <id> <0..1000> - output torque limit", [](SerialConsole &c) {
+        const int id = c.nextInt(-1);
+        const int limit = c.nextInt(-1);
+
+        if (id < 1 || limit < 0 || limit > 1000) {
+            Serial << "usage: torquelimit <id> <0..1000>" << endl;
+
+            return;
+        }
+
+        if (servo.setTorqueLimit((uint8_t)id, (uint16_t)limit)) {
+            Serial << "torque limit " << id << " = " << limit << endl;
+        } else {
+            Serial << "set torque limit failed" << endl;
+        }
+    });
+
+    console.addCommand("pid", "pid <id> <kp> <kd> <ki>    - position loop gains (0..255)", [](SerialConsole &c) {
+        const int id = c.nextInt(-1);
+        const int kp = c.nextInt(-1);
+        const int kd = c.nextInt(-1);
+        const int ki = c.nextInt(-1);
+
+        if (id < 1 || kp < 0 || kp > 255 || kd < 0 || kd > 255 || ki < 0 || ki > 255) {
+            Serial << "usage: pid <id> <kp> <kd> <ki>  (each 0..255)" << endl;
+
+            return;
+        }
+
+        if (servo.setPid((uint8_t)id, (uint8_t)kp, (uint8_t)kd, (uint8_t)ki)) {
+            Serial << "pid " << id << " = " << kp << "/" << kd << "/" << ki << endl;
+        } else {
+            Serial << "set pid failed" << endl;
+        }
+    });
+
+    console.addCommand("unload", "unload <id> <mask>         - faults that release torque (bitmask)", [](SerialConsole &c) {
+        const int id = c.nextInt(-1);
+        const int mask = c.nextInt(-1);
+
+        if (id < 1 || mask < 0 || mask > 255) {
+            Serial << "usage: unload <id> <mask>  (0x01 volt 0x02 sensor 0x04 temp 0x08 current 0x20 overload)" << endl;
+
+            return;
+        }
+
+        if (servo.setUnloadingCondition((uint8_t)id, (uint8_t)mask)) {
+            Serial << "unload condition " << id << " = " << mask << endl;
+        } else {
+            Serial << "set unload condition failed" << endl;
+        }
+    });
+
+    console.addCommand("torque", "torque <id> <0|1>          - torque off / on", [](SerialConsole &c) {
+        const int id = c.nextInt(-1);
+        const int on = c.nextInt(-1);
 
         servo.setTorque((uint8_t)id, on != 0);
         Serial << "torque " << id << " = " << (on != 0) << endl;
-
-        return;
-    }
-
-    Serial << "unknown command '" << command << "' (try help)" << endl;
+    });
 }
 
 void setup() {
@@ -467,22 +385,11 @@ void setup() {
         return;
     }
 
+    registerCommands();
     scanBus();
-    printHelp();
+    console.printHelp();
 }
 
 void loop() {
-    while (Serial.available()) {
-        const char c = Serial.read();
-
-        if (c == '\n' || c == '\r') {
-            if (lineLength > 0) {
-                lineBuffer[lineLength] = '\0';
-                handleCommand(lineBuffer);
-                lineLength = 0;
-            }
-        } else if (lineLength < sizeof(lineBuffer) - 1) {
-            lineBuffer[lineLength++] = c;
-        }
-    }
+    console.loop();
 }
