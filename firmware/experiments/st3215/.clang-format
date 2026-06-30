@@ -1,0 +1,54 @@
+# Base style
+BasedOnStyle: LLVM
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+ColumnLimit: 200
+
+# Brace wrapping
+BreakBeforeBraces: Attach
+BraceWrapping:
+  AfterFunction: false
+  AfterControlStatement: Never
+
+# Keep multi-line bodies explicit and readable
+AllowShortFunctionsOnASingleLine: None
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+AllowShortBlocksOnASingleLine: Never
+AllowShortLambdasOnASingleLine: Empty
+
+# Spacing & pointers—very
+SpaceBeforeParens: ControlStatements
+SpaceBeforeCpp11BracedList: true
+PointerAlignment: Left
+
+# Function calls/params—prefer vertical alignment over bin-packing
+BinPackArguments: false
+BinPackParameters: false
+AlignAfterOpenBracket: Align
+
+# Template declarations—break after template parameters
+AlwaysBreakTemplateDeclarations: Yes
+
+# Constructor initializer lists—clean diffs
+ConstructorInitializerAllOnOneLineOrOnePerLine: false
+BreakConstructorInitializersBeforeComma: true
+
+# Stable order & dedup
+SortIncludes: true
+IncludeBlocks: Regroup
+IncludeCategories:
+  - Regex: "^<.*>$" # system/stdlib headers
+    Priority: 1
+  - Regex: '^"third_party/.*"' # third-party (tweak path to your tree)
+    Priority: 2
+  - Regex: '^".*"' # project headers
+    Priority: 3
+
+# Namespaces, switches, comments—quality of life.
+NamespaceIndentation: Inner
+FixNamespaceComments: true
+IndentCaseLabels: true
+IndentPPDirectives: AfterHash
+ReflowComments: true
