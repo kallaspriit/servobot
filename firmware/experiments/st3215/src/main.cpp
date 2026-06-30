@@ -99,7 +99,7 @@ static void printFeedback(uint8_t id) {
         return;
     }
 
-    Serial << "pos=" << feedback.position << " speed=" << feedback.speed << " load=" << feedback.load << " current=" << feedback.current << " moving=" << feedback.isMoving << endl;
+    Serial << "pos=" << feedback.position << " speed=" << feedback.speed << " load=" << feedback.load << " current=" << feedback.currentMa << "mA moving=" << feedback.isMoving << endl;
     Serial << "Voltage: ";
     printVolts(feedback.voltageDeciV);
     Serial << " temp=" << feedback.temperatureC << " C" << endl;
@@ -124,8 +124,7 @@ static void scanBus() {
 
 /** Registers all servo console commands. */
 static void registerCommands() {
-    console.addCommand("scan", "scan                       - find servos (IDs 1..20)", [](SerialConsole &c) {
-        (void)c;
+    console.addCommand("scan", "scan                       - find servos (IDs 1..20)", [](SerialConsole &) {
         scanBus();
     });
 

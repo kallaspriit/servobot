@@ -10,13 +10,36 @@ static constexpr uint32_t kReplyTimeoutUs = 4000;
 // Calibration trigger value written to the torque-enable register.
 static constexpr uint8_t kCalibrationTrigger = 128;
 
-// Decodes a Feetech sign-magnitude 16-bit value (bit 15 is the sign).
-static int decodeSigned(uint16_t value) {
-    if (value & 0x8000) {
-        return -(int)(value & 0x7FFF);
+// Bytes read from PresentPosition onward for a full feedback block.
+static constexpr uint8_t kFeedbackLength = 15;
+
+// Maximum bytes scanned looking for a reply's 0xFF 0xFF header.
+static constexpr int kMaxHeaderScanBytes = 32;
+
+// Sign bit for position/speed/current (16-bit sign-magnitude). Load is special:
+// it is a 10-bit magnitude with bit 10 as the direction bit.
+static constexpr uint16_t kSignBit16 = 0x8000;
+static constexpr uint16_t kSignBitLoad = 0x0400;
+
+/**
+ * Decodes a Feetech sign-magnitude value. The given sign bit marks direction;
+ * the bits below it are the magnitude.
+ */
+static int decodeSignMagnitude(uint16_t value, uint16_t signBit) {
+    if (value & signBit) {
+        return -(int)(value & (signBit - 1));
     }
 
     return (int)value;
+}
+
+/** Encodes a signed value as Feetech 16-bit sign-magnitude (bit 15 = sign). */
+static uint16_t encodeSignMagnitude(int16_t value) {
+    if (value < 0) {
+        return (uint16_t)(-value) | kSignBit16;
+    }
+
+    return (uint16_t)value;
 }
 
 bool St3215::begin() {
@@ -59,11 +82,7 @@ bool St3215::setMode(uint8_t id, Mode mode) {
 }
 
 bool St3215::writePos(uint8_t id, int16_t position, uint16_t speed, uint8_t acc) {
-    uint16_t encodedPosition = (uint16_t)position;
-
-    if (position < 0) {
-        encodedPosition = (uint16_t)(-position) | 0x8000;
-    }
+    const uint16_t encodedPosition = encodeSignMagnitude(position);
 
     // Registers 41..47 are contiguous: acceleration, goal position, goal time
     // (unused), goal speed.
@@ -86,11 +105,7 @@ bool St3215::writePos(uint8_t id, int16_t position, uint16_t speed, uint8_t acc)
 }
 
 bool St3215::regWritePos(uint8_t id, int16_t position, uint16_t speed, uint8_t acc) {
-    uint16_t encodedPosition = (uint16_t)position;
-
-    if (position < 0) {
-        encodedPosition = (uint16_t)(-position) | 0x8000;
-    }
+    const uint16_t encodedPosition = encodeSignMagnitude(position);
 
     const uint8_t params[] = {
         (uint8_t)Register::Acceleration,
@@ -138,11 +153,7 @@ void St3215::syncWritePos(const uint8_t* ids, uint8_t count, const int16_t* posi
     size_t index = 7;
 
     for (uint8_t i = 0; i < count; i++) {
-        uint16_t encodedPosition = (uint16_t)positions[i];
-
-        if (positions[i] < 0) {
-            encodedPosition = (uint16_t)(-positions[i]) | 0x8000;
-        }
+        const uint16_t encodedPosition = encodeSignMagnitude(positions[i]);
 
         const uint8_t block[kDataLen] = {
             accs[i],
@@ -169,11 +180,7 @@ void St3215::syncWritePos(const uint8_t* ids, uint8_t count, const int16_t* posi
 }
 
 bool St3215::writeSpeed(uint8_t id, int16_t speed, uint8_t acc) {
-    uint16_t encodedSpeed = (uint16_t)speed;
-
-    if (speed < 0) {
-        encodedSpeed = (uint16_t)(-speed) | 0x8000;
-    }
+    const uint16_t encodedSpeed = encodeSignMagnitude(speed);
 
     if (!writeByte(id, Register::Acceleration, acc)) {
         return false;
@@ -197,13 +204,13 @@ int St3215::readPosition(uint8_t id) {
 }
 
 bool St3215::readFeedback(uint8_t id, ServoFeedback& out) {
-    const uint8_t params[] = {(uint8_t)Register::PresentPositionL, 15};
+    const uint8_t params[] = {(uint8_t)Register::PresentPositionL, kFeedbackLength};
     sendPacket(id, Instruction::Read, params, sizeof(params));
 
     uint8_t body[16];
     uint8_t count = 0;
 
-    if (readReply(body, sizeof(body), count, kReplyTimeoutUs) < 0 || count < 15) {
+    if (readReply(body, sizeof(body), count, kReplyTimeoutUs) < 0 || count < kFeedbackLength) {
         out.isValid = false;
 
         return false;
@@ -219,12 +226,10 @@ bool St3215::readFeedback(uint8_t id, ServoFeedback& out) {
 }
 
 bool St3215::syncReadFeedback(const uint8_t* ids, uint8_t count, ServoFeedback* out) {
-    static constexpr uint8_t kDataLen = 15;
-
     // Build the sync-read request: FF FF FE LEN 82 ADDR DATALEN id... CHK
     uint8_t packet[64];
     const uint8_t length = count + 4;
-    uint16_t checksum = kBroadcastId + length + (uint8_t)Instruction::SyncRead + (uint8_t)Register::PresentPositionL + kDataLen;
+    uint16_t checksum = kBroadcastId + length + (uint8_t)Instruction::SyncRead + (uint8_t)Register::PresentPositionL + kFeedbackLength;
 
     packet[0] = 0xFF;
     packet[1] = 0xFF;
@@ -232,7 +237,7 @@ bool St3215::syncReadFeedback(const uint8_t* ids, uint8_t count, ServoFeedback* 
     packet[3] = length;
     packet[4] = (uint8_t)Instruction::SyncRead;
     packet[5] = (uint8_t)Register::PresentPositionL;
-    packet[6] = kDataLen;
+    packet[6] = kFeedbackLength;
 
     size_t index = 7;
 
@@ -253,7 +258,7 @@ bool St3215::syncReadFeedback(const uint8_t* ids, uint8_t count, ServoFeedback* 
         uint8_t replyCount = 0;
         uint8_t replyId = 0;
 
-        if (readReply(body, sizeof(body), replyCount, kReplyTimeoutUs, &replyId) < 0 || replyCount < kDataLen || replyId != ids[i]) {
+        if (readReply(body, sizeof(body), replyCount, kReplyTimeoutUs, &replyId) < 0 || replyCount < kFeedbackLength || replyId != ids[i]) {
             out[i].isValid = false;
             allValid = false;
 
@@ -417,7 +422,7 @@ int St3215::readReply(uint8_t* params, uint8_t maxParams, uint8_t& outCount, uin
     uint8_t prev = 0x00;
     bool synced = false;
 
-    for (int i = 0; i < 32 && !synced; i++) {
+    for (int i = 0; i < kMaxHeaderScanBytes && !synced; i++) {
         uint8_t byte = 0;
 
         if (bus_.readBytes(&byte, 1, timeoutUs) != 1) {
@@ -507,26 +512,30 @@ void St3215::lockEeprom(uint8_t id, bool locked) {
 
 void St3215::decodeFeedback(const uint8_t* body, ServoFeedback& out) {
     // Position is unsigned 0..4095 in position mode, but sign-magnitude and
-    // multi-turn in step mode, so decode the sign.
-    out.position = decodeSigned(body[0] | (body[1] << 8));
-    out.speed = decodeSigned(body[2] | (body[3] << 8));
-    out.load = decodeSigned(body[4] | (body[5] << 8));
+    // multi-turn in step mode. Speed and current are 16-bit sign-magnitude;
+    // load is a 10-bit magnitude with bit 10 as the direction bit.
+    out.position = decodeSignMagnitude(body[0] | (body[1] << 8), kSignBit16);
+    out.speed = decodeSignMagnitude(body[2] | (body[3] << 8), kSignBit16);
+    out.load = decodeSignMagnitude(body[4] | (body[5] << 8), kSignBitLoad);
     out.voltageDeciV = body[6];
     out.temperatureC = body[7];
     out.status = decodeStatus(body[9]);
     out.isMoving = body[10] != 0;
-    out.current = decodeSigned(body[13] | (body[14] << 8));
+
+    // Present current is ~6.5 mA per count (nominal). 6.5 = 13/2, so this stays
+    // integer-exact without floating point.
+    out.currentMa = decodeSignMagnitude(body[13] | (body[14] << 8), kSignBit16) * 13 / 2;
     out.isValid = true;
 }
 
 St3215::ServoStatus St3215::decodeStatus(uint8_t raw) {
     ServoStatus status;
     status.raw = raw;
-    status.hasVoltageFault = raw & 0x01;
-    status.hasSensorFault = raw & 0x02;
-    status.hasTemperatureFault = raw & 0x04;
-    status.hasCurrentFault = raw & 0x08;
-    status.hasOverloadFault = raw & 0x20;
+    status.hasVoltageFault = (raw & (uint8_t)Fault::Voltage) != 0;
+    status.hasSensorFault = (raw & (uint8_t)Fault::Sensor) != 0;
+    status.hasTemperatureFault = (raw & (uint8_t)Fault::Temperature) != 0;
+    status.hasCurrentFault = (raw & (uint8_t)Fault::Current) != 0;
+    status.hasOverloadFault = (raw & (uint8_t)Fault::Overload) != 0;
     status.isValid = true;
 
     return status;

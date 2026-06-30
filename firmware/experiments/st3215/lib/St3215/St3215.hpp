@@ -85,6 +85,18 @@ class St3215 {
         Step = 3,     // Step / multi-turn mode
     };
 
+    /**
+     * Servo fault flags, used both in the status byte (see ServoStatus) and as
+     * the mask for setUnloadingCondition(). Values can be OR-ed together.
+     */
+    enum class Fault : uint8_t {
+        Voltage = 0x01,     // Input voltage out of range
+        Sensor = 0x02,      // Angle / encoder sensor fault
+        Temperature = 0x04, // Temperature over limit
+        Current = 0x08,     // Current over limit
+        Overload = 0x20,    // Sustained overload
+    };
+
     /** Decoded servo status/error flags (Register::Status and reply error byte). */
     struct ServoStatus {
         uint8_t raw = 0;                 // Raw status byte
@@ -103,7 +115,7 @@ class St3215 {
         int load = 0;           // Signed, -1000..1000 (0.1% of max torque)
         int voltageDeciV = 0;   // Tenths of a volt (115 = 11.5 V)
         int temperatureC = 0;   // Degrees Celsius
-        int current = 0;        // Signed, raw units (~6.5 mA each)
+        int currentMa = 0;      // Signed milliamps (nominal: raw count x 6.5)
         bool isMoving = false;  // Servo is currently moving
         ServoStatus status;     // Decoded fault flags
         bool isValid = false;   // Was the feedback read successfully
@@ -263,6 +275,11 @@ class St3215 {
      * Reads feedback from several servos with a single request (instruction
      * 0x82). The servos reply in the order listed, which is far fewer bus
      * turnarounds than polling each one individually.
+     *
+     * Note: replies are matched positionally. If a listed servo does not answer,
+     * the following servos' entries may be marked invalid for that call (the
+     * stream falls out of step); they recover on the next call. Intended for
+     * servos already confirmed present (e.g. via scan).
      *
      * @param ids   Array of servo IDs.
      * @param count Number of servos.
