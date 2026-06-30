@@ -260,6 +260,19 @@ class St3215 {
     bool readStatus(uint8_t id, ServoStatus& out);
 
     /**
+     * Reads feedback from several servos with a single request (instruction
+     * 0x82). The servos reply in the order listed, which is far fewer bus
+     * turnarounds than polling each one individually.
+     *
+     * @param ids   Array of servo IDs.
+     * @param count Number of servos.
+     * @param out   Array of feedback structs (one per servo); each entry's
+     *              isValid reflects whether that servo answered.
+     * @returns true if every servo answered.
+     */
+    bool syncReadFeedback(const uint8_t* ids, uint8_t count, ServoFeedback* out);
+
+    /**
      * Reads static identification and configured limits from EEPROM.
      *
      * @param id  Servo ID.
@@ -267,6 +280,48 @@ class St3215 {
      * @returns true if the read succeeded.
      */
     bool readInfo(uint8_t id, ServoInfo& out);
+
+    /**
+     * Sets the position-mode angle limits (persisted to EEPROM). Setting both to
+     * 0 disables the limits, allowing full continuous travel.
+     *
+     * @param id          Servo ID.
+     * @param minPosition Minimum allowed position 0..4095.
+     * @param maxPosition Maximum allowed position 0..4095.
+     * @returns true on success.
+     */
+    bool setAngleLimits(uint8_t id, uint16_t minPosition, uint16_t maxPosition);
+
+    /**
+     * Sets the runtime output torque (force) limit.
+     *
+     * @param id    Servo ID.
+     * @param limit Torque limit 0..1000 (0.1% of maximum torque).
+     * @returns true if acknowledged.
+     */
+    bool setTorqueLimit(uint8_t id, uint16_t limit);
+
+    /**
+     * Sets the position loop PID coefficients (persisted to EEPROM).
+     *
+     * @param id Servo ID.
+     * @param kp Proportional coefficient.
+     * @param kd Derivative coefficient.
+     * @param ki Integral coefficient.
+     * @returns true on success.
+     */
+    bool setPid(uint8_t id, uint8_t kp, uint8_t kd, uint8_t ki);
+
+    /**
+     * Sets which fault flags cause the servo to release torque (persisted to
+     * EEPROM). The bit mask uses the same layout as ServoStatus: 0x01 voltage,
+     * 0x02 sensor, 0x04 temperature, 0x08 current, 0x20 overload.
+     *
+     * @param id        Servo ID.
+     * @param faultMask Faults that should unload torque.
+     * @returns true on success.
+     */
+    bool setUnloadingCondition(uint8_t id, uint8_t faultMask);
 
     /**
      * Reads a single-byte register.
@@ -326,14 +381,24 @@ class St3215 {
         Write = 0x03,
         RegWrite = 0x04,
         Action = 0x05,
+        SyncRead = 0x82,
         SyncWrite = 0x83,
     };
 
     /** Builds and transmits an instruction packet. */
     void sendPacket(uint8_t id, Instruction instr, const uint8_t* params, uint8_t nparams);
 
-    /** Reads and validates a status reply, returning the error byte or -1. */
-    int readReply(uint8_t* params, uint8_t maxParams, uint8_t& outCount, uint32_t timeoutUs);
+    /**
+     * Reads and validates a status reply, returning the error byte or -1.
+     * If outId is non-null it receives the replying servo's ID.
+     */
+    int readReply(uint8_t* params, uint8_t maxParams, uint8_t& outCount, uint32_t timeoutUs, uint8_t* outId = nullptr);
+
+    /** Locks or unlocks the EEPROM write protection, with a commit delay. */
+    void lockEeprom(uint8_t id, bool locked);
+
+    /** Decodes a 15-byte feedback block into a ServoFeedback. */
+    static void decodeFeedback(const uint8_t* body, ServoFeedback& out);
 
     /** Decodes a raw status byte into a ServoStatus. */
     static ServoStatus decodeStatus(uint8_t raw);

@@ -209,23 +209,98 @@ bool St3215::readFeedback(uint8_t id, ServoFeedback& out) {
         return false;
     }
 
-    // Position is unsigned 0..4095 in position mode, but sign-magnitude and
-    // multi-turn in step mode, so decode the sign.
-    out.position = decodeSigned(body[0] | (body[1] << 8));
-    out.speed = decodeSigned(body[2] | (body[3] << 8));
-    out.load = decodeSigned(body[4] | (body[5] << 8));
-    out.voltageDeciV = body[6];
-    out.temperatureC = body[7];
-    out.status = decodeStatus(body[9]);
-    out.isMoving = body[10] != 0;
-    out.current = decodeSigned(body[13] | (body[14] << 8));
-    out.isValid = true;
+    decodeFeedback(body, out);
 
     if (out.status.raw != 0) {
         ST_LOG_W("servo %u fault flags 0x%02X", id, out.status.raw);
     }
 
     return true;
+}
+
+bool St3215::syncReadFeedback(const uint8_t* ids, uint8_t count, ServoFeedback* out) {
+    static constexpr uint8_t kDataLen = 15;
+
+    // Build the sync-read request: FF FF FE LEN 82 ADDR DATALEN id... CHK
+    uint8_t packet[64];
+    const uint8_t length = count + 4;
+    uint16_t checksum = kBroadcastId + length + (uint8_t)Instruction::SyncRead + (uint8_t)Register::PresentPositionL + kDataLen;
+
+    packet[0] = 0xFF;
+    packet[1] = 0xFF;
+    packet[2] = kBroadcastId;
+    packet[3] = length;
+    packet[4] = (uint8_t)Instruction::SyncRead;
+    packet[5] = (uint8_t)Register::PresentPositionL;
+    packet[6] = kDataLen;
+
+    size_t index = 7;
+
+    for (uint8_t i = 0; i < count; i++) {
+        packet[index++] = ids[i];
+        checksum += ids[i];
+    }
+
+    packet[index++] = (uint8_t)(~checksum);
+
+    bus_.writePacket(packet, index);
+
+    // Each servo replies in turn, in the order listed.
+    bool allValid = true;
+
+    for (uint8_t i = 0; i < count; i++) {
+        uint8_t body[16];
+        uint8_t replyCount = 0;
+        uint8_t replyId = 0;
+
+        if (readReply(body, sizeof(body), replyCount, kReplyTimeoutUs, &replyId) < 0 || replyCount < kDataLen || replyId != ids[i]) {
+            out[i].isValid = false;
+            allValid = false;
+
+            continue;
+        }
+
+        decodeFeedback(body, out[i]);
+    }
+
+    return allValid;
+}
+
+bool St3215::setAngleLimits(uint8_t id, uint16_t minPosition, uint16_t maxPosition) {
+    lockEeprom(id, false);
+    const bool okMin = writeWord(id, Register::MinAngleLimitL, minPosition);
+    delay(10);
+    const bool okMax = writeWord(id, Register::MaxAngleLimitL, maxPosition);
+    delay(10);
+    lockEeprom(id, true);
+
+    return okMin && okMax;
+}
+
+bool St3215::setTorqueLimit(uint8_t id, uint16_t limit) {
+    return writeWord(id, Register::TorqueLimitL, limit);
+}
+
+bool St3215::setPid(uint8_t id, uint8_t kp, uint8_t kd, uint8_t ki) {
+    lockEeprom(id, false);
+    const bool okP = writeByte(id, Register::PositionKp, kp);
+    delay(10);
+    const bool okD = writeByte(id, Register::PositionKd, kd);
+    delay(10);
+    const bool okI = writeByte(id, Register::PositionKi, ki);
+    delay(10);
+    lockEeprom(id, true);
+
+    return okP && okD && okI;
+}
+
+bool St3215::setUnloadingCondition(uint8_t id, uint8_t faultMask) {
+    lockEeprom(id, false);
+    const bool ok = writeByte(id, Register::UnloadingCondition, faultMask);
+    delay(10);
+    lockEeprom(id, true);
+
+    return ok;
 }
 
 bool St3215::readStatus(uint8_t id, ServoStatus& out) {
@@ -335,7 +410,7 @@ void St3215::sendPacket(uint8_t id, Instruction instr, const uint8_t* params, ui
     bus_.writePacket(packet, 6 + nparams);
 }
 
-int St3215::readReply(uint8_t* params, uint8_t maxParams, uint8_t& outCount, uint32_t timeoutUs) {
+int St3215::readReply(uint8_t* params, uint8_t maxParams, uint8_t& outCount, uint32_t timeoutUs, uint8_t* outId) {
     outCount = 0;
 
     // Find the 0xFF 0xFF header.
@@ -418,7 +493,30 @@ int St3215::readReply(uint8_t* params, uint8_t maxParams, uint8_t& outCount, uin
     outCount = copyCount;
     lastError_ = error;
 
+    if (outId) {
+        *outId = id;
+    }
+
     return error;
+}
+
+void St3215::lockEeprom(uint8_t id, bool locked) {
+    writeByte(id, Register::Lock, locked ? 1 : 0);
+    delay(10);
+}
+
+void St3215::decodeFeedback(const uint8_t* body, ServoFeedback& out) {
+    // Position is unsigned 0..4095 in position mode, but sign-magnitude and
+    // multi-turn in step mode, so decode the sign.
+    out.position = decodeSigned(body[0] | (body[1] << 8));
+    out.speed = decodeSigned(body[2] | (body[3] << 8));
+    out.load = decodeSigned(body[4] | (body[5] << 8));
+    out.voltageDeciV = body[6];
+    out.temperatureC = body[7];
+    out.status = decodeStatus(body[9]);
+    out.isMoving = body[10] != 0;
+    out.current = decodeSigned(body[13] | (body[14] << 8));
+    out.isValid = true;
 }
 
 St3215::ServoStatus St3215::decodeStatus(uint8_t raw) {
