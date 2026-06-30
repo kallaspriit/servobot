@@ -53,6 +53,20 @@ class SwUartHalfDuplex {
     /** Discards any bytes currently sitting in the receive FIFO. */
     void flushRx();
 
+    /**
+     * Returns the number of bytes currently waiting in the receive FIFO.
+     *
+     * @returns Count of available bytes (0..8).
+     */
+    int rxAvailable();
+
+    /**
+     * Reads one received byte without blocking.
+     *
+     * @returns The byte 0..255, or -1 if the receive FIFO is empty.
+     */
+    int readByteNonBlocking();
+
    private:
     PIO pio_;
     uint smTx_;

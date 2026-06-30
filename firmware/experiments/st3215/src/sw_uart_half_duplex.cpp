@@ -162,6 +162,20 @@ void SwUartHalfDuplex::flushRx() {
     pio_sm_clear_fifos(pio_, smRx_);
 }
 
+int SwUartHalfDuplex::rxAvailable() {
+    return (int)pio_sm_get_rx_fifo_level(pio_, smRx_);
+}
+
+int SwUartHalfDuplex::readByteNonBlocking() {
+    if (pio_sm_is_rx_fifo_empty(pio_, smRx_)) {
+        return -1;
+    }
+
+    const uint32_t value = pio_sm_get(pio_, smRx_);
+
+    return (int)(uint8_t)(value >> 24);
+}
+
 void SwUartHalfDuplex::restartRx() {
     pio_sm_set_enabled(pio_, smRx_, false);
     pio_sm_clear_fifos(pio_, smRx_);
