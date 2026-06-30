@@ -77,6 +77,13 @@ bool St3215::setTorque(uint8_t id, bool on) {
     return writeByte(id, Register::TorqueEnable, on ? 1 : 0);
 }
 
+void St3215::relaxAll() {
+    // Broadcast write; servos do not reply to the broadcast ID, so nothing is
+    // read back.
+    const uint8_t params[] = {(uint8_t)Register::TorqueEnable, 0};
+    sendPacket(kBroadcastId, Instruction::Write, params, sizeof(params));
+}
+
 bool St3215::setMode(uint8_t id, Mode mode) {
     return writeByte(id, Register::OperatingMode, (uint8_t)mode);
 }
@@ -187,6 +194,18 @@ bool St3215::writeSpeed(uint8_t id, int16_t speed, uint8_t acc) {
     }
 
     return writeWord(id, Register::GoalSpeedL, encodedSpeed);
+}
+
+bool St3215::stop(uint8_t id) {
+    const int position = readPosition(id);
+
+    if (position < 0) {
+        return false;
+    }
+
+    // Goal = present position halts position/step modes; goal speed 0 (the speed
+    // argument) halts speed/wheel mode.
+    return writePos(id, (int16_t)position, 0, 0);
 }
 
 bool St3215::calibrateMid(uint8_t id) {

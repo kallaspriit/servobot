@@ -21,6 +21,10 @@ static SwUartPioBus bus(kServoPin, kServoBaud);
 static St3215 servo(bus);
 static SerialConsole console(Serial);
 
+// Servos discovered by the last scan; used by "stop" so no motor is missed.
+static uint8_t discoveredIds[kMaxScanId];
+static uint8_t discoveredCount = 0;
+
 /** Prints a deci-volt value (tenths of a volt) as "X.Y V". */
 static void printVolts(int deciVolts) {
     Serial << (deciVolts / 10) << "." << (deciVolts % 10) << " V";
@@ -110,16 +114,16 @@ static void printFeedback(uint8_t id) {
 static void scanBus() {
     Serial << "Scanning IDs 1.." << kMaxScanId << " ..." << endl;
 
-    int found = 0;
+    discoveredCount = 0;
 
     for (uint8_t id = 1; id <= kMaxScanId; id++) {
         if (servo.ping(id) != -1) {
             Serial << "  found servo " << id << endl;
-            found++;
+            discoveredIds[discoveredCount++] = id;
         }
     }
 
-    Serial << found << " servo(s) found" << endl;
+    Serial << discoveredCount << " servo(s) found" << endl;
 }
 
 /** Registers all servo console commands. */
@@ -355,6 +359,40 @@ static void registerCommands() {
         } else {
             Serial << "set unload condition failed" << endl;
         }
+    });
+
+    console.addCommand("stop", "stop [id]                  - stop & hold all known servos (or one)", [](SerialConsole &c) {
+        const int id = c.nextInt(-1);
+
+        if (id > 0) {
+            if (servo.stop((uint8_t)id)) {
+                Serial << "stopped servo " << id << endl;
+            } else {
+                Serial << "stop failed for servo " << id << endl;
+            }
+
+            return;
+        }
+
+        for (uint8_t i = 0; i < discoveredCount; i++) {
+            servo.stop(discoveredIds[i]);
+        }
+
+        Serial << "stopped " << discoveredCount << " servo(s)" << endl;
+    });
+
+    console.addCommand("relax", "relax [id]                 - release torque / free-wheel (all via broadcast, or one)", [](SerialConsole &c) {
+        const int id = c.nextInt(-1);
+
+        if (id > 0) {
+            servo.setTorque((uint8_t)id, false);
+            Serial << "relaxed servo " << id << endl;
+
+            return;
+        }
+
+        servo.relaxAll();
+        Serial << "relaxed all servos (broadcast)" << endl;
     });
 
     console.addCommand("torque", "torque <id> <0|1>          - torque off / on", [](SerialConsole &c) {

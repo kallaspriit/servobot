@@ -177,6 +177,13 @@ class St3215 {
     bool setTorque(uint8_t id, bool on);
 
     /**
+     * Releases torque on every servo with a single broadcast packet, so they
+     * free-wheel. No replies are expected, so this reaches all servos on the bus
+     * regardless of which IDs are known.
+     */
+    void relaxAll();
+
+    /**
      * Sets the servo's operating mode, persisting it to EEPROM.
      *
      * @param id   Servo ID.
@@ -236,6 +243,17 @@ class St3215 {
      * @returns true if acknowledged.
      */
     bool writeSpeed(uint8_t id, int16_t speed, uint8_t acc = 0);
+
+    /**
+     * Stops a servo and holds its current position: sets the goal position to
+     * the present position and goal speed to zero, which halts position, step,
+     * and speed (wheel) modes alike. Torque state is left unchanged, so a
+     * powered servo holds and a relaxed one stays free.
+     *
+     * @param id Servo ID.
+     * @returns true on success.
+     */
+    bool stop(uint8_t id);
 
     /**
      * Calibrates the servo's current physical position as the mid-point (2047).
